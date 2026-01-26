@@ -147,6 +147,13 @@ func handleHome(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleMetrics(w http.ResponseWriter, r *http.Request) {
+	err := templates.ExecuteTemplate(w, "metrics.html", nil)
+	if err != nil {
+		http.Error(w, "Erro ao carregar métricas", http.StatusInternalServerError)
+	}
+}
+
 func main() {
 	log.Println("Iniciando url-insight...")
 	_ = godotenv.Load()
@@ -191,6 +198,7 @@ func main() {
 	http.HandleFunc("/collect", handleCollect)
 	http.HandleFunc("/show-data", handleShowData)
 	http.HandleFunc("/analytics", handleAnalytics)
+	http.HandleFunc("/metrics", handleMetrics)
 	log.Println("Starting server on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Println("Server failed:", err)
