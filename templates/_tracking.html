@@ -1,0 +1,75 @@
+{{define "tracking"}}
+{{if or .GAID .PixelID}}
+<script>
+  (function () {
+    var KEY = 'urlinsight_consent';
+    function get() { try { return localStorage.getItem(KEY); } catch (e) { return null; } }
+    function set(v) { try { localStorage.setItem(KEY, v); } catch (e) {} }
+
+    // Scripts de terceiros só são carregados depois do consentimento.
+    function loadTrackers() {
+      {{if .GAID}}
+      var gaId = '{{.GAID}}';
+      var g = document.createElement('script');
+      g.async = true;
+      g.src = 'https://www.googletagmanager.com/gtag/js?id=' + encodeURIComponent(gaId);
+      document.head.appendChild(g);
+      window.dataLayer = window.dataLayer || [];
+      window.gtag = function () { dataLayer.push(arguments); };
+      gtag('js', new Date());
+      gtag('config', gaId);
+      {{end}}
+      {{if .PixelID}}
+      !function (f, b, e, v, n, t, s) {
+        if (f.fbq) return; n = f.fbq = function () {
+          n.callMethod ? n.callMethod.apply(n, arguments) : n.queue.push(arguments)
+        };
+        if (!f._fbq) f._fbq = n; n.push = n; n.loaded = !0; n.version = '2.0';
+        n.queue = []; t = b.createElement(e); t.async = !0;
+        t.src = v; s = b.getElementsByTagName(e)[0];
+        s.parentNode.insertBefore(t, s)
+      }(window, document, 'script', 'https://connect.facebook.net/en_US/fbevents.js');
+      fbq('init', '{{.PixelID}}');
+      fbq('track', 'PageView');
+      {{end}}
+    }
+
+    window.urlInsightConsent = get;
+    window.urlInsightResetConsent = function () { try { localStorage.removeItem(KEY); } catch (e) {} location.reload(); };
+
+    if (get() === 'granted') loadTrackers();
+    {{if .ShowBanner}}
+    if (get() === null) {
+      document.addEventListener('DOMContentLoaded', function () {
+        var bar = document.createElement('div');
+        bar.setAttribute('role', 'dialog');
+        bar.setAttribute('aria-label', 'Consentimento de cookies');
+        bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:1000;background:#222;color:#fff;padding:16px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:center;font:14px Arial,sans-serif';
+        var text = document.createElement('span');
+        text.textContent = 'Usamos cookies de análise (Google Analytics e Meta Pixel) para medir cliques e campanhas. Só ativamos com o seu consentimento. ';
+        var link = document.createElement('a');
+        link.href = '/privacidade';
+        link.textContent = 'Política de privacidade';
+        link.style.color = '#9cf';
+        text.appendChild(link);
+        function button(label, value, bg, fg) {
+          var b = document.createElement('button');
+          b.type = 'button';
+          b.textContent = label;
+          b.style.cssText = 'border:0;border-radius:4px;padding:8px 16px;cursor:pointer;background:' + bg + ';color:' + fg;
+          b.onclick = function () {
+            set(value);
+            bar.remove();
+            if (value === 'granted') loadTrackers();
+          };
+          return b;
+        }
+        bar.append(text, button('Recusar', 'denied', '#555', '#fff'), button('Aceitar', 'granted', '#0d6efd', '#fff'));
+        document.body.appendChild(bar);
+      });
+    }
+    {{end}}
+  })();
+</script>
+{{end}}
+{{end}}

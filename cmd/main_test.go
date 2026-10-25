@@ -317,3 +317,60 @@ func TestOpenDBMigratesCreatedAt(t *testing.T) {
 	}
 	conn2.Close()
 }
+
+func TestNoTrackingWithoutConfiguredIDs(t *testing.T) {
+	setup(t)
+	seed(t, "abc", "https://example.com")
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"home":     do(handleHome, "GET", "/", ""),
+		"redirect": do(handleRedirect, "GET", "/r/abc", ""),
+		"privacy":  do(handlePrivacy, "GET", "/privacidade", ""),
+	} {
+		body := rec.Body.String()
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: %d", name, rec.Code)
+		}
+		for _, forbidden := range []string{"googletagmanager", "fbevents", "G-JSKELV8899", "980116012414974"} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("%s não deveria conter %q sem IDs configurados", name, forbidden)
+			}
+		}
+	}
+}
+
+func TestTrackingIDsComeFromEnvAndAreGatedByConsent(t *testing.T) {
+	setup(t)
+	t.Setenv("URLINSIGHT_GA_ID", "G-TESTE123")
+	t.Setenv("URLINSIGHT_FB_PIXEL_ID", "555666777")
+
+	body := do(handleHome, "GET", "/", "").Body.String()
+	for _, want := range []string{"G-TESTE123", "555666777", "urlinsight_consent", "/privacidade"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("home deveria conter %q", want)
+		}
+	}
+	// Nenhum script de terceiro pode ser referenciado como tag estática: só via loadTrackers().
+	if strings.Contains(body, `<script async src="https://www.googletagmanager.com`) || strings.Contains(body, "<noscript>") {
+		t.Error("scripts de terceiros não podem carregar antes do consentimento")
+	}
+}
+
+func TestTrackingIDIsEscaped(t *testing.T) {
+	setup(t)
+	t.Setenv("URLINSIGHT_GA_ID", `x'; alert(1); '`)
+	body := do(handleHome, "GET", "/", "").Body.String()
+	if strings.Contains(body, `x'; alert(1); '`) {
+		t.Error("ID de tracking deveria ser escapado no contexto JavaScript")
+	}
+}
+
+func TestPrivacyPageContact(t *testing.T) {
+	setup(t)
+	if body := do(handlePrivacy, "GET", "/privacidade", "").Body.String(); strings.Contains(body, "mailto:") {
+		t.Error("sem e-mail configurado não deveria haver link mailto")
+	}
+	t.Setenv("URLINSIGHT_CONTACT_EMAIL", "privacidade@example.com")
+	if body := do(handlePrivacy, "GET", "/privacidade", "").Body.String(); !strings.Contains(body, "mailto:privacidade@example.com") {
+		t.Error("e-mail de contato deveria aparecer na política")
+	}
+}
