@@ -1,11 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func setup(t *testing.T) {
@@ -213,4 +216,104 @@ func TestSQLiteDSN(t *testing.T) {
 	if got := sqliteDSN("file:a.db?cache=shared"); got != "file:a.db?cache=shared&_foreign_keys=1" {
 		t.Errorf("got %q", got)
 	}
+}
+
+func TestReadEndpointsRequireTokenWhenSet(t *testing.T) {
+	setup(t)
+	seed(t, "abc", "https://example.com")
+	t.Setenv("URLINSIGHT_ADMIN_TOKEN", "segredo")
+
+	for name, h := range map[string]http.HandlerFunc{
+		"show-data": requireAuth(handleShowData),
+		"analytics": requireAuth(handleAnalytics),
+	} {
+		if rec := do(h, "GET", "/"+name+"?short_id=abc", ""); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s sem token deveria dar 401, deu %d", name, rec.Code)
+		}
+		req := httptest.NewRequest("GET", "/"+name+"?short_id=abc", nil)
+		req.Header.Set("Authorization", "Bearer errado")
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s com token errado deveria dar 401, deu %d", name, rec.Code)
+		}
+		req.Header.Set("Authorization", "Bearer segredo")
+		rec = httptest.NewRecorder()
+		h(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s com token deveria dar 200, deu %d", name, rec.Code)
+		}
+	}
+}
+
+func TestReadEndpointsOpenWithoutToken(t *testing.T) {
+	setup(t)
+	if rec := do(requireAuth(handleAnalytics), "GET", "/analytics?short_id=abc", ""); rec.Code != http.StatusOK {
+		t.Errorf("sem token configurado deveria dar 200, deu %d", rec.Code)
+	}
+}
+
+func TestCreatedAtAndClicksByDay(t *testing.T) {
+	setup(t)
+	seed(t, "abc", "https://example.com")
+	for i := 0; i < 2; i++ {
+		if rec := do(handleCollect, "POST", "/collect", `{"short_id":"abc","created_at":"1999-01-01"}`); rec.Code != http.StatusOK {
+			t.Fatalf("collect: %d", rec.Code)
+		}
+	}
+
+	var payloads []Payload
+	rec := do(handleShowData, "GET", "/show-data?short_id=abc", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &payloads); err != nil || len(payloads) != 2 {
+		t.Fatalf("payloads: %v %s", err, rec.Body)
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	for _, p := range payloads {
+		if !strings.HasPrefix(p.CreatedAt, today) {
+			t.Errorf("created_at deveria ser definido pelo servidor (%s), veio %q", today, p.CreatedAt)
+		}
+	}
+
+	var stats struct {
+		ClicksByDay map[string]int `json:"clicks_by_day"`
+	}
+	rec = do(handleAnalytics, "GET", "/analytics?short_id=abc", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &stats); err != nil || stats.ClicksByDay[today] != 2 {
+		t.Errorf("clicks_by_day inesperado: %v %+v", err, stats)
+	}
+}
+
+func TestOpenDBMigratesCreatedAt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "antigo.db")
+	old, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE shortids (short_id TEXT PRIMARY KEY, url TEXT)`,
+		`CREATE TABLE payloads (id INTEGER PRIMARY KEY AUTOINCREMENT, short_id TEXT, ga TEXT, fbp TEXT, ua TEXT, origin TEXT)`,
+		`INSERT INTO shortids VALUES ('abc', 'https://example.com')`,
+		`INSERT INTO payloads (short_id) VALUES ('abc')`,
+	} {
+		if _, err := old.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old.Close()
+
+	conn, err := openDB(path)
+	if err != nil {
+		t.Fatalf("migração falhou: %v", err)
+	}
+	defer conn.Close()
+	var createdAt sql.NullString
+	if err := conn.QueryRow("SELECT created_at FROM payloads").Scan(&createdAt); err != nil || createdAt.Valid {
+		t.Errorf("registro antigo deveria ter created_at NULL: %v %v", err, createdAt)
+	}
+	// Reabrir não deve falhar (coluna já existe).
+	conn2, err := openDB(path)
+	if err != nil {
+		t.Fatalf("reabrir falhou: %v", err)
+	}
+	conn2.Close()
 }

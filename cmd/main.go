@@ -27,6 +27,8 @@ type Payload struct {
 	FBP     string `json:"fbp"`
 	UA      string `json:"ua"`
 	Origin  string `json:"origin"`
+	// CreatedAt é preenchido pelo servidor (UTC); ignorado no corpo do /collect.
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // templatesGlob permite rodar os testes de dentro de cmd/.
@@ -71,6 +73,17 @@ func authorized(r *http.Request) bool {
 	}
 	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+}
+
+// requireAuth protege um handler com o mesmo token de administração do /shorten.
+func requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(r) {
+			http.Error(w, "Não autorizado", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func lookupTargetByShortID(shortID string) string {
@@ -174,7 +187,7 @@ func handleCollect(w http.ResponseWriter, r *http.Request) {
 		payload.Origin = r.Referer()
 	}
 	// Salva no banco
-	_, err := db.Exec(`INSERT INTO payloads (short_id, ga, fbp, ua, origin) VALUES (?, ?, ?, ?, ?)`,
+	_, err := db.Exec(`INSERT INTO payloads (short_id, ga, fbp, ua, origin, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`,
 		payload.ShortID, payload.GA, payload.FBP, payload.UA, payload.Origin)
 	if err != nil {
 		log.Println("Erro ao salvar payload:", err)
@@ -195,7 +208,7 @@ func handleShowData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Println("Showing collected data for short_id:", shortID)
-	rows, err := db.Query(`SELECT short_id, ga, fbp, ua, origin FROM payloads WHERE short_id = ?`, shortID)
+	rows, err := db.Query(`SELECT short_id, ga, fbp, ua, origin, COALESCE(created_at, '') FROM payloads WHERE short_id = ? ORDER BY id`, shortID)
 	if err != nil {
 		log.Println("Erro ao buscar payloads:", err)
 		http.Error(w, "Erro ao buscar dados", http.StatusInternalServerError)
@@ -205,7 +218,7 @@ func handleShowData(w http.ResponseWriter, r *http.Request) {
 	var filtered []Payload
 	for rows.Next() {
 		var p Payload
-		if err := rows.Scan(&p.ShortID, &p.GA, &p.FBP, &p.UA, &p.Origin); err == nil {
+		if err := rows.Scan(&p.ShortID, &p.GA, &p.FBP, &p.UA, &p.Origin, &p.CreatedAt); err == nil {
 			filtered = append(filtered, p)
 		}
 	}
@@ -222,7 +235,7 @@ func handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Println("Generating analytics for short_id:", shortID)
-	rows, err := db.Query(`SELECT ga, fbp, ua, origin FROM payloads WHERE short_id = ?`, shortID)
+	rows, err := db.Query(`SELECT ga, fbp, ua, origin, COALESCE(substr(created_at, 1, 10), '') FROM payloads WHERE short_id = ?`, shortID)
 	if err != nil {
 		log.Println("Erro ao buscar payloads:", err)
 		http.Error(w, "Erro ao buscar dados", http.StatusInternalServerError)
@@ -234,9 +247,13 @@ func handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	fbpCount := make(map[string]int)
 	uaCount := make(map[string]int)
 	originCount := make(map[string]int)
+	dayCount := make(map[string]int)
 	for rows.Next() {
-		var ga, fbp, ua, origin string
-		if err := rows.Scan(&ga, &fbp, &ua, &origin); err == nil {
+		var ga, fbp, ua, origin, day string
+		if err := rows.Scan(&ga, &fbp, &ua, &origin, &day); err == nil {
+			if day != "" {
+				dayCount[day]++
+			}
 			total++
 			gaCount[ga]++
 			fbpCount[fbp]++
@@ -245,11 +262,12 @@ func handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	stats := map[string]interface{}{
-		"total":        total,
-		"ga_count":     gaCount,
-		"fbp_count":    fbpCount,
-		"ua_count":     uaCount,
-		"origin_count": originCount,
+		"total":         total,
+		"ga_count":      gaCount,
+		"fbp_count":     fbpCount,
+		"ua_count":      uaCount,
+		"origin_count":  originCount,
+		"clicks_by_day": dayCount,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(stats); err != nil {
@@ -303,6 +321,7 @@ func openDB(path string) (*sql.DB, error) {
 			fbp TEXT,
 			ua TEXT,
 			origin TEXT,
+			created_at TEXT,
 			FOREIGN KEY(short_id) REFERENCES shortids(short_id) ON DELETE CASCADE
 		);`,
 	} {
@@ -311,7 +330,40 @@ func openDB(path string) (*sql.DB, error) {
 			return nil, err
 		}
 	}
+	if err := addColumnIfMissing(conn, "payloads", "created_at", "TEXT"); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	return conn, nil
+}
+
+// addColumnIfMissing migra bancos criados antes da coluna existir.
+func addColumnIfMissing(conn *sql.DB, table, column, typ string) error {
+	rows, err := conn.Query("SELECT name FROM pragma_table_info(?)", table)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if found {
+		return nil
+	}
+	_, err = conn.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + typ)
+	return err
 }
 
 func main() {
@@ -336,8 +388,8 @@ func main() {
 	http.HandleFunc("/shorten", handleShorten)
 	http.HandleFunc("/r/", handleRedirect)
 	http.HandleFunc("/collect", handleCollect)
-	http.HandleFunc("/show-data", handleShowData)
-	http.HandleFunc("/analytics", handleAnalytics)
+	http.HandleFunc("/show-data", requireAuth(handleShowData))
+	http.HandleFunc("/analytics", requireAuth(handleAnalytics))
 	http.HandleFunc("/metrics", handleMetrics)
 	log.Println("Starting server on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
