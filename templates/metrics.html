@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <title>Métricas - URL Insight</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin-top: 40px; }
+    .chart-container { width: 80%; margin: 0 auto; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="mb-4 text-center">Métricas do ShortID</h1>
+    <form class="mb-4 text-center" id="formShortID">
+      <label for="shortID" class="form-label">Informe o short_id:</label>
+      <input type="text" id="shortID" name="shortID" class="form-control d-inline-block w-auto" required>
+      <button type="submit" class="btn btn-primary ms-2">Buscar</button>
+    </form>
+    <div class="chart-container">
+      <canvas id="metricsChart"></canvas>
+    </div>
+    <div id="metricsData" class="mt-4"></div>
+  </div>
+  <script>
+    const form = document.getElementById('formShortID');
+    const chartCanvas = document.getElementById('metricsChart');
+    let chartInstance;
+
+    function getShortIdFromUrl() {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('short_id') || '';
+    }
+
+    window.onload = async function() {
+      const shortID = getShortIdFromUrl();
+      if (shortID) {
+        form.style.display = 'none';
+        await fetchAndRender(shortID);
+      } else {
+        form.style.display = '';
+      }
+    };
+
+    form.onsubmit = async function(e) {
+      e.preventDefault();
+      const shortID = document.getElementById('shortID').value;
+      if (!shortID) return;
+      await fetchAndRender(shortID);
+    };
+
+    async function fetchAndRender(shortID) {
+      const res = await fetch(`/analytics?short_id=${encodeURIComponent(shortID)}`);
+      const data = await res.json();
+      renderChart(data);
+      renderData(data);
+    }
+
+    function renderChart(data) {
+      const labels = ['GA', 'FBP', 'UA', 'Origin'];
+      const values = [
+        Object.keys(data.ga_count).length,
+        Object.keys(data.fbp_count).length,
+        Object.keys(data.ua_count).length,
+        Object.keys(data.origin_count).length
+      ];
+      if (chartInstance) chartInstance.destroy();
+      chartInstance = new Chart(chartCanvas, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Quantidade de valores únicos',
+            data: values,
+            backgroundColor: [
+              'rgba(54, 162, 235, 0.7)',
+              'rgba(75, 192, 192, 0.7)',
+              'rgba(255, 206, 86, 0.7)',
+              'rgba(255, 99, 132, 0.7)'
+            ]
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: false },
+            title: { display: true, text: 'Métricas do ShortID' }
+          }
+        }
+      });
+    }
+    function renderData(data) {
+      document.getElementById('metricsData').innerHTML = `
+        <h4>Total de registros: ${data.total}</h4>
+        <pre>${JSON.stringify(data, null, 2)}</pre>
+      `;
+    }
+  </script>
+</body>
+</html>
