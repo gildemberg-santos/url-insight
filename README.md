@@ -36,7 +36,15 @@ go run ./cmd/main.go
 | `URLINSIGHT_DB` | Caminho do arquivo SQLite. Sem ela, usa `:memory:` (dados perdidos ao reiniciar). |
 | `URLINSIGHT_ADMIN_TOKEN` | Se definida, `POST /shorten`, `GET /analytics` e `GET /show-data` exigem `Authorization: Bearer <token>` (a página `/metrics` pede o token ao receber 401). Sem ela, tudo fica aberto. |
 
-Um exemplo está em `.env.example`. Bancos criados antes da coluna `created_at` são migrados automaticamente.
+| `URLINSIGHT_GA_ID` | ID do Google Analytics (ex.: `G-XXXXXXX`). Vazio: o script não é carregado. |
+| `URLINSIGHT_FB_PIXEL_ID` | ID do Meta Pixel. Vazio: o script não é carregado. |
+| `URLINSIGHT_CONTACT_EMAIL` | E-mail exibido na política de privacidade para pedidos de titulares. |
+
+Um exemplo está em `.env.example`.
+
+### Consentimento (LGPD)
+
+GA e Meta Pixel só são carregados depois que o visitante aceita no banner da página inicial (a escolha fica no `localStorage`). Sem consentimento, `/r/<id>` não envia os cookies `_ga`/`_fbp` ao `/collect`. Quem chega direto a um link `/r/` sem ter decidido antes na página inicial não recebe trackers. A política fica em `/privacidade` e permite revogar a escolha. O texto é um modelo e deve ser revisado pelo responsável pelo tratamento dos dados. Bancos criados antes da coluna `created_at` são migrados automaticamente.
 
 ## Endpoints
 
@@ -45,6 +53,7 @@ Um exemplo está em `.env.example`. Bancos criados antes da coluna `created_at` 
 - `POST /collect` — registra o payload (404 se o `short_id` não existe).
 - `GET /analytics?short_id=` e `GET /show-data?short_id=` — JSON com estatísticas (incluindo `clicks_by_day`) / registros (com `created_at` em UTC).
 - `GET /metrics?short_id=` — página de métricas.
+- `GET /privacidade` — política de privacidade e revogação do consentimento.
 
 ## Contribuição
 

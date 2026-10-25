@@ -31,6 +31,24 @@ type Payload struct {
 	CreatedAt string `json:"created_at,omitempty"`
 }
 
+// PageData alimenta os templates. Os IDs de tracking vêm do ambiente; sem eles,
+// nenhum script de terceiros é carregado.
+type PageData struct {
+	Target       string
+	GAID         string
+	PixelID      string
+	ContactEmail string
+	ShowBanner   bool
+}
+
+func newPageData() PageData {
+	return PageData{
+		GAID:         os.Getenv("URLINSIGHT_GA_ID"),
+		PixelID:      os.Getenv("URLINSIGHT_FB_PIXEL_ID"),
+		ContactEmail: os.Getenv("URLINSIGHT_CONTACT_EMAIL"),
+	}
+}
+
 // templatesGlob permite rodar os testes de dentro de cmd/.
 func templatesGlob() string {
 	if _, err := os.Stat("templates"); err != nil {
@@ -163,7 +181,11 @@ func handleRedirect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	templates.ExecuteTemplate(w, "intermediate.html", map[string]string{"Target": target})
+	data := newPageData()
+	data.Target = target
+	if err := templates.ExecuteTemplate(w, "intermediate.html", data); err != nil {
+		log.Println("Erro ao renderizar intermediate.html:", err)
+	}
 }
 
 func handleCollect(w http.ResponseWriter, r *http.Request) {
@@ -276,9 +298,19 @@ func handleAnalytics(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHome(w http.ResponseWriter, r *http.Request) {
-	err := templates.ExecuteTemplate(w, "index.html", nil)
+	data := newPageData()
+	data.ShowBanner = true
+	err := templates.ExecuteTemplate(w, "index.html", data)
 	if err != nil {
 		http.Error(w, "Erro ao carregar página inicial", http.StatusInternalServerError)
+	}
+}
+
+func handlePrivacy(w http.ResponseWriter, r *http.Request) {
+	data := newPageData()
+	data.ShowBanner = true
+	if err := templates.ExecuteTemplate(w, "privacy.html", data); err != nil {
+		http.Error(w, "Erro ao carregar política de privacidade", http.StatusInternalServerError)
 	}
 }
 
@@ -391,6 +423,7 @@ func main() {
 	http.HandleFunc("/show-data", requireAuth(handleShowData))
 	http.HandleFunc("/analytics", requireAuth(handleAnalytics))
 	http.HandleFunc("/metrics", handleMetrics)
+	http.HandleFunc("/privacidade", handlePrivacy)
 	log.Println("Starting server on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Println("Server failed:", err)
