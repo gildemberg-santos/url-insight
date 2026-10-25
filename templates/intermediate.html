@@ -45,7 +45,9 @@
       origin: document.referrer
     };
     fetch('/collect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
-      .then(r => r.json()).then(j => location.href = j.redirect_to);
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(j => location.href = j.redirect_to)
+      .catch(() => { location.href = target; });
   </script>
 </body>
 

@@ -1,18 +1,24 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
+	"strings"
 
 	"github.com/Envek/godotenv"
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
-var templates = template.Must(template.New("main").ParseGlob("templates/*.html"))
+var templates = template.Must(template.New("main").ParseGlob(templatesGlob()))
 var db *sql.DB
 
 type Payload struct {
@@ -21,6 +27,50 @@ type Payload struct {
 	FBP     string `json:"fbp"`
 	UA      string `json:"ua"`
 	Origin  string `json:"origin"`
+}
+
+// templatesGlob permite rodar os testes de dentro de cmd/.
+func templatesGlob() string {
+	if _, err := os.Stat("templates"); err != nil {
+		return "../templates/*.html"
+	}
+	return "templates/*.html"
+}
+
+const maxBodyBytes = 1 << 20
+
+var shortIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{3,64}$`)
+
+func validateTargetURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("a URL deve começar com http:// ou https:// e conter um host")
+	}
+	return nil
+}
+
+func generateShortID() (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 7)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b), nil
+}
+
+func authorized(r *http.Request) bool {
+	token := os.Getenv("URLINSIGHT_ADMIN_TOKEN")
+	if token == "" {
+		return true
+	}
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
 }
 
 func lookupTargetByShortID(shortID string) string {
@@ -35,6 +85,63 @@ func lookupTargetByShortID(shortID string) string {
 	return url
 }
 
+func handleShorten(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
+	if !authorized(r) {
+		http.Error(w, "Não autorizado", http.StatusUnauthorized)
+		return
+	}
+	var req struct {
+		URL     string `json:"url"`
+		ShortID string `json:"short_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if err := validateTargetURL(req.URL); err != nil {
+		http.Error(w, "URL inválida: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ShortID != "" && !shortIDPattern.MatchString(req.ShortID) {
+		http.Error(w, "short_id deve ter de 3 a 64 caracteres (letras, números, _ ou -)", http.StatusBadRequest)
+		return
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		id := req.ShortID
+		if id == "" {
+			var err error
+			if id, err = generateShortID(); err != nil {
+				http.Error(w, "Erro ao gerar short_id", http.StatusInternalServerError)
+				return
+			}
+		}
+		_, err := db.Exec("INSERT INTO shortids (short_id, url) VALUES (?, ?)", id, req.URL)
+		if err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"short_id": id, "url": req.URL, "path": "/r/" + id})
+			return
+		}
+		var sqlErr sqlite3.Error
+		if errors.As(err, &sqlErr) && sqlErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey {
+			if req.ShortID != "" {
+				http.Error(w, "short_id já existe", http.StatusConflict)
+				return
+			}
+			continue // colisão em ID gerado: tenta outro
+		}
+		log.Println("Erro ao salvar short_id:", err)
+		http.Error(w, "Erro ao salvar link", http.StatusInternalServerError)
+		return
+	}
+	http.Error(w, "Não foi possível gerar um short_id único", http.StatusInternalServerError)
+}
+
 func handleRedirect(w http.ResponseWriter, r *http.Request) {
 	log.Println("Received request for:", r.URL.Path)
 	shortID := r.URL.Path[len("/r/"):]
@@ -47,10 +154,20 @@ func handleRedirect(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleCollect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
 	log.Println("Collecting data from:", r.RemoteAddr)
 	var payload Payload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&payload); err != nil {
 		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	target := lookupTargetByShortID(payload.ShortID)
+	if target == "" {
+		http.Error(w, "short_id não encontrado", http.StatusNotFound)
 		return
 	}
 	if payload.Origin == "" {
@@ -65,7 +182,7 @@ func handleCollect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	response := map[string]string{"status": "success", "redirect_to": lookupTargetByShortID(payload.ShortID)}
+	response := map[string]string{"status": "success", "redirect_to": target}
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, "Erro ao enviar resposta", http.StatusInternalServerError)
 	}
@@ -154,6 +271,49 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// sqliteDSN habilita as chaves estrangeiras (desligadas por padrão no SQLite).
+func sqliteDSN(path string) string {
+	if strings.Contains(path, "?") {
+		return path + "&_foreign_keys=1"
+	}
+	return path + "?_foreign_keys=1"
+}
+
+func openDB(path string) (*sql.DB, error) {
+	conn, err := sql.Open("sqlite3", sqliteDSN(path))
+	if err != nil {
+		return nil, err
+	}
+	// Uma única conexão: com ":memory:" cada conexão do pool teria um banco separado,
+	// e o SQLite só admite um escritor por vez.
+	conn.SetMaxOpenConns(1)
+	if err := conn.Ping(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS shortids (
+			short_id TEXT PRIMARY KEY,
+			url TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS payloads (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			short_id TEXT,
+			ga TEXT,
+			fbp TEXT,
+			ua TEXT,
+			origin TEXT,
+			FOREIGN KEY(short_id) REFERENCES shortids(short_id) ON DELETE CASCADE
+		);`,
+	} {
+		if _, err := conn.Exec(stmt); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
+	return conn, nil
+}
+
 func main() {
 	log.Println("Iniciando url-insight...")
 	_ = godotenv.Load()
@@ -164,36 +324,16 @@ func main() {
 	}
 	log.Println("Usando banco de dados em:", dbPath)
 	var err error
-	log.Println("Conectado ao banco de dados.")
-	db, err = sql.Open("sqlite3", dbPath)
+	db, err = openDB(dbPath)
 	if err != nil {
-		log.Fatal("Erro ao abrir banco de dados:", err)
+		log.Fatal("Erro ao inicializar banco de dados:", err)
 	}
 	defer db.Close()
-	// Cria tabelas se não existirem
-	log.Println("Criando tabelas se não existirem...")
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS shortids (
-		short_id TEXT PRIMARY KEY,
-		url TEXT
-	);`)
-	if err != nil {
-		log.Fatal("Erro ao criar tabela shortids:", err)
-	}
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS payloads (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		short_id TEXT,
-		ga TEXT,
-		fbp TEXT,
-		ua TEXT,
-		origin TEXT,
-		FOREIGN KEY(short_id) REFERENCES shortids(short_id) ON DELETE CASCADE
-	);`)
-	if err != nil {
-		log.Fatal("Erro ao criar tabela payloads:", err)
-	}
+	log.Println("Banco de dados pronto.")
 
 	log.Println("Configurando handlers...")
-	http.HandleFunc("/", handleHome)
+	http.HandleFunc("/{$}", handleHome)
+	http.HandleFunc("/shorten", handleShorten)
 	http.HandleFunc("/r/", handleRedirect)
 	http.HandleFunc("/collect", handleCollect)
 	http.HandleFunc("/show-data", handleShowData)
