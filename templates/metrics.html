@@ -50,8 +50,25 @@
       await fetchAndRender(shortID);
     };
 
+    function authHeaders() {
+      let token = '';
+      try { token = sessionStorage.getItem('adminToken') || ''; } catch (e) {}
+      return token ? { Authorization: 'Bearer ' + token } : {};
+    }
+
     async function fetchAndRender(shortID) {
-      const res = await fetch(`/analytics?short_id=${encodeURIComponent(shortID)}`);
+      const url = `/analytics?short_id=${encodeURIComponent(shortID)}`;
+      let res = await fetch(url, { headers: authHeaders() });
+      if (res.status === 401) {
+        const token = prompt('Token de administração:');
+        if (!token) return;
+        try { sessionStorage.setItem('adminToken', token); } catch (e) {}
+        res = await fetch(url, { headers: authHeaders() });
+      }
+      if (!res.ok) {
+        document.getElementById('metricsData').textContent = 'Erro ao carregar métricas (' + res.status + ').';
+        return;
+      }
       const data = await res.json();
       renderChart(data);
       renderData(data);
@@ -91,10 +108,14 @@
       });
     }
     function renderData(data) {
-      document.getElementById('metricsData').innerHTML = `
-        <h4>Total de registros: ${data.total}</h4>
-        <pre>${JSON.stringify(data, null, 2)}</pre>
-      `;
+      // textContent: ua/origin vêm do visitante e não podem virar HTML.
+      const box = document.getElementById('metricsData');
+      box.textContent = '';
+      const title = document.createElement('h4');
+      title.textContent = 'Total de registros: ' + data.total;
+      const pre = document.createElement('pre');
+      pre.textContent = JSON.stringify(data, null, 2);
+      box.append(title, pre);
     }
   </script>
 </body>
